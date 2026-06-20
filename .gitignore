@@ -1,0 +1,44 @@
+# Ignore virtual environments
+venv/
+venv2/
+.venv/
+Env/
+env/
+
+# Ignore local generated folders
+assets/
+audio/
+images/
+videos/
+news/
+logs/
+config/
+scripts/
+
+# Ignore Python runtime files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
+# Ignore environmental configurations
+.env
+.env.local
+.env.*.local
+
+# Ignore video rendering test files
+*.mp4
+*.wav
+*.ass
+*.srt
+*.jpg
+*.png
+*.json
+!memory.json
+!requirements.txt
+!.env.example

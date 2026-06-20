@@ -1,0 +1,22 @@
+# AI Daily News YouTube Agent — Dependencies
+# Install: pip install -r requirements.txt
+
+# --- News Collection ---
+feedparser>=6.0.0
+
+# --- AI Script Generation (Ollama client) ---
+ollama>=0.3.0
+
+# --- Text-to-Speech ---
+edge-tts>=6.1.0
+
+# --- Image Generation ---
+Pillow>=10.0.0
+
+# --- YouTube Upload ---
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.0
+
+# --- Configuration ---
+python-dotenv>=1.0.0
