@@ -49,7 +49,8 @@ logger = get_logger(__name__)
 _DUPLICATE_THRESHOLD: float = 0.7
 
 # Maximum number of stories to return after de-duplication.
-_MAX_STORIES: int = 5
+# V2 Rule: One video = one news story.
+_MAX_STORIES: int = 1
 
 
 # ======================================================================
@@ -290,6 +291,18 @@ def collect_news(config: Config, date_str: str) -> List[NewsStory]:
                     logger.debug(
                         "Skipping duplicate: '%s'", story.title[:80]
                     )
+                    continue
+
+                # --- Topic Filtering ----------------------------------
+                topic_match = False
+                text_to_check = (story.title + " " + story.summary).lower()
+                for topic in config.allowed_topics:
+                    if topic.lower() in text_to_check:
+                        topic_match = True
+                        break
+                
+                if not topic_match:
+                    logger.debug("Skipping off-topic story: '%s'", story.title[:80])
                     continue
 
                 accepted_titles.append(story.title)

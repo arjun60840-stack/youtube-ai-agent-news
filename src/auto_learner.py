@@ -123,6 +123,87 @@ def _deduce_rule_with_ai(videos_data, config) -> str:
     
     return response["message"]["content"].strip().strip('"').strip("'")
 
+def _deduce_visual_rule_with_ai(score, config) -> str:
+    """
+    Asks the LLM to turn a quality_reviewer.py ReviewScore's weak dimensions
+    and feedback text into a single, concrete rule for the Director AI
+    (image_generator.py's ComfyUI prompt generator) to follow next time.
+    """
+    logger.info("Analyzing visual quality score with %s...", config.ollama_model)
+
+    prompt = (
+        "You are an AI Visual Director managing an automated tech news video pipeline.\n"
+        "The most recent video scored the following on an automated quality review:\n\n"
+        f"  visual_score:  {score.visual_score}/100\n"
+        f"  dynamic_score: {score.dynamic_score}/100\n"
+        f"  sync_score:    {score.sync_score}/100\n\n"
+        f"REVIEWER FEEDBACK:\n{score.feedback}\n\n"
+        "Write a SINGLE, concise imperative rule (under 20 words) that tells an AI "
+        "Director generating ComfyUI image prompts how to avoid this specific weakness "
+        "in future scenes. Be concrete and visual — refer to composition, subject "
+        "matter, framing, or scene pacing, not abstract advice.\n"
+        "OUTPUT FORMAT: Return ONLY the English rule. Do not wrap it in quotes. No extra commentary."
+    )
+
+    client = ollama.Client(host=config.ollama_base_url)
+    response = client.chat(
+        model=config.ollama_model,
+        messages=[{"role": "system", "content": prompt}]
+    )
+
+    return response["message"]["content"].strip().strip('"').strip("'")
+
+
+def learn_from_quality_score(score, config, threshold: int = 75) -> None:
+    """
+    Inspect a quality_reviewer.py ReviewScore after a pipeline run and, if any
+    visual-related dimension (visual_score, dynamic_score, sync_score) is
+    below `threshold`, deduce a concrete visual rule via the LLM and persist
+    it to memory.json under category="visual".
+
+    This closes the loop that previously discarded score.feedback entirely:
+    quality_reviewer.py already computes visual_score/dynamic_score/sync_score
+    every single run, but nothing ever read those numbers again after the
+    pass/fail decision on overall_score. A video can pass overall_score >= 90
+    while still having a mediocre visual_score (e.g. dragged up by a strong
+    voice_score) — this checks each visual dimension independently so those
+    cases still teach the Director AI something.
+
+    Call this once per attempt, right after review_video_metadata(), in
+    main.py's self-improvement loop — regardless of whether the attempt
+    ultimately passes the overall_score >= 90 gate.
+    """
+    weak_dims = []
+    if score.visual_score < threshold:
+        weak_dims.append(f"visual_score={score.visual_score}")
+    if score.dynamic_score < threshold:
+        weak_dims.append(f"dynamic_score={score.dynamic_score}")
+    if score.sync_score < threshold:
+        weak_dims.append(f"sync_score={score.sync_score}")
+
+    if not weak_dims:
+        logger.info(
+            "Visual dimensions all >= %d (visual=%d, dynamic=%d, sync=%d) — nothing to learn.",
+            threshold, score.visual_score, score.dynamic_score, score.sync_score,
+        )
+        return
+
+    logger.info("Weak visual dimensions detected: %s. Deducing a visual rule...", ", ".join(weak_dims))
+
+    try:
+        rule = _deduce_visual_rule_with_ai(score, config)
+    except Exception as e:
+        logger.error("Failed to deduce visual rule from quality score: %s", e)
+        return
+
+    if not rule:
+        logger.warning("LLM returned an empty visual rule — not saving.")
+        return
+
+    add_rule(rule, category="visual")
+    logger.info("Learned new visual rule from quality review: '%s'", rule)
+
+
 def run_auto_learner(config):
     youtube = _get_authenticated_service(config)
     if not youtube:

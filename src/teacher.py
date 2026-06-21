@@ -41,13 +41,13 @@ def _translate_to_rule(raw_feedback: str, config) -> str:
     rule = response["message"]["content"].strip().strip('"').strip("'")
     return rule
 
-def process_text(text: str, config):
-    logger.info("Processing text feedback: %s", text)
+def process_text(text: str, config, category: str = "script"):
+    logger.info("Processing text feedback: %s (category=%s)", text, category)
     rule = _translate_to_rule(text, config)
-    add_rule(rule)
-    print(f"\n[+] Successfully learned new rule: {rule}")
+    add_rule(rule, category=category)
+    print(f"\n[+] Successfully learned new '{category}' rule: {rule}")
 
-def process_voice(config):
+def process_voice(config, category: str = "script"):
     try:
         import speech_recognition as sr
         import sounddevice as sd
@@ -87,8 +87,8 @@ def process_voice(config):
         print(f"🎙️ You said: {transcript}")
         
         rule = _translate_to_rule(transcript, config)
-        add_rule(rule)
-        print(f"\n[+] Successfully learned new rule: {rule}")
+        add_rule(rule, category=category)
+        print(f"\n[+] Successfully learned new '{category}' rule: {rule}")
         
     except sr.UnknownValueError:
         print("❌ Could not understand the audio.")
@@ -105,15 +105,27 @@ def main():
     parser = argparse.ArgumentParser(description="Teach the AI Agent new rules via text or voice.")
     parser.add_argument("--text", type=str, help="Text feedback to teach the agent.")
     parser.add_argument("--voice", action="store_true", help="Use microphone to record voice feedback.")
+    parser.add_argument(
+        "--category",
+        type=str,
+        default="script",
+        choices=["script", "visual", "voice", "general"],
+        help=(
+            "Which part of the pipeline this rule should steer. "
+            "'script' (default) reaches the CrewAI script-writing agents. "
+            "'visual' reaches the ComfyUI Director AI prompt in image_generator.py. "
+            "'voice' and 'general' are reserved for future consumers."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config()
     setup_logging(config.logs_dir, "teacher")
 
     if args.text:
-        process_text(args.text, config)
+        process_text(args.text, config, category=args.category)
     elif args.voice:
-        process_voice(config)
+        process_voice(config, category=args.category)
     else:
         parser.print_help()
 

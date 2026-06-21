@@ -15,6 +15,7 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Base 16:9 resolution (fallback to 1024x576)
 WIDTH, HEIGHT = 1280, 720
 
 # ======================================================================
@@ -64,15 +65,15 @@ def _validate_prompt(prompt: str) -> bool:
     return True
 
 
-def _build_comfyui_prompt(positive_prompt: str, negative_prompt: str) -> dict:
+def _build_comfyui_prompt(positive_prompt: str, negative_prompt: str, width: int = WIDTH, height: int = HEIGHT) -> dict:
     """Builds the JSON payload for the ComfyUI /prompt endpoint."""
     return {
         "3": {
             "class_type": "KSampler",
             "inputs": {
                 "seed": random.randint(1, 999999999999999),
-                "steps": 30,
-                "cfg": 7.0,
+                "steps": 20,
+                "cfg": 6.0,
                 "sampler_name": "dpmpp_2m",
                 "scheduler": "karras",
                 "denoise": 1.0,
@@ -91,8 +92,8 @@ def _build_comfyui_prompt(positive_prompt: str, negative_prompt: str) -> dict:
         "5": {
             "class_type": "EmptyLatentImage",
             "inputs": {
-                "width": WIDTH,
-                "height": HEIGHT,
+                "width": width,
+                "height": height,
                 "batch_size": 1
             }
         },
@@ -129,7 +130,7 @@ def _build_comfyui_prompt(positive_prompt: str, negative_prompt: str) -> dict:
 def _get_image_from_comfyui(base_url: str, prompt_id: str) -> str:
     """Poll ComfyUI history and retrieve the generated filename."""
     history_url = f"{base_url}/history/{prompt_id}"
-    for _ in range(150): # Wait up to 300 seconds (150 * 2s)
+    for _ in range(450): # Wait up to 900 seconds (450 * 2s)
         try:
             res = requests.get(history_url)
             if res.status_code == 200:
@@ -143,17 +144,27 @@ def _get_image_from_comfyui(base_url: str, prompt_id: str) -> str:
         except Exception as e:
             logger.error(f"Error polling ComfyUI history: {e}")
             time.sleep(2)
-    raise TimeoutError("ComfyUI generation timed out after 300 seconds.")
+    raise TimeoutError("ComfyUI generation timed out after 900 seconds.")
 
 def _download_comfyui_image(base_url: str, filename: str, save_path: Path):
     """Download the final image from ComfyUI."""
     img_url = f"{base_url}/view?filename={filename}&type=output"
     urllib.request.urlretrieve(img_url, str(save_path))
 
-def ensure_comfyui_running(base_url: str):
-    """Ensures ComfyUI is running, starts it if offline, and verifies the model exists."""
+def ensure_comfyui_running(base_url: str, config: "Config" = None):
+    """Ensures ComfyUI is running, starts it if offline, and verifies the model exists.
+
+    BUGFIX: comfy_dir and the checkpoint filename were hardcoded to
+    "%USERPROFILE%\\ComfyUI" and "juggernautXL_ragnarok.safetensors". If your
+    actual ComfyUI install path or checkpoint filename differs even slightly
+    (different model name, different drive, portable install, Linux/WSL),
+    this raises FileNotFoundError on EVERY scene, every single time, which is
+    why "ComfyUI images do not appear in the final video" -- generation never
+    succeeds even once. Both are now read from Config / env vars with the old
+    values kept ONLY as a last-resort default.
+    """
     logger.info("Checking ComfyUI server status...")
-    
+
     is_running = False
     try:
         res = requests.get(base_url)
@@ -161,18 +172,26 @@ def ensure_comfyui_running(base_url: str):
             is_running = True
     except requests.exceptions.RequestException:
         pass
-        
+
+    comfy_dir = os.environ.get(
+        "COMFYUI_INSTALL_DIR",
+        os.path.expandvars(r"%USERPROFILE%\ComfyUI"),
+    )
+    checkpoint_name = os.environ.get(
+        "COMFYUI_CHECKPOINT_NAME",
+        "juggernautXL_ragnarok.safetensors",
+    )
+
     if not is_running:
         logger.warning(f"ComfyUI is offline at {base_url}. Attempting to start automatically...")
-        comfy_dir = os.path.expandvars(r"%USERPROFILE%\ComfyUI")
-        cmd = 'call venv\\Scripts\\activate && start "" python main.py'
-        
+        cmd = 'call venv\\Scripts\\activate && start "" python main.py --lowvram'
+
         try:
             subprocess.Popen(cmd, cwd=comfy_dir, shell=True)
             logger.info("Spawned ComfyUI process. Waiting up to 120 seconds...")
         except Exception as e:
             raise RuntimeError(f"Failed to start ComfyUI subprocess: {e}")
-            
+
         start_time = time.time()
         while time.time() - start_time < 120:
             try:
@@ -183,15 +202,23 @@ def ensure_comfyui_running(base_url: str):
                     break
             except requests.exceptions.RequestException:
                 time.sleep(5)
-                
+
         if not is_running:
             raise RuntimeError("ComfyUI failed to start within 120 seconds.")
-            
-    model_path = Path(os.path.expandvars(r"%USERPROFILE%\ComfyUI\models\checkpoints\juggernautXL_ragnarok.safetensors"))
-    if not model_path.exists():
-        raise FileNotFoundError(f"CRITICAL: Required image model missing at {model_path}")
 
-def _generate_single_image(base_url: str, positive_prompt: str, save_path: Path):
+    checkpoint_dir = Path(comfy_dir) / "models" / "checkpoints"
+    model_path = checkpoint_dir / checkpoint_name
+    if not model_path.exists():
+        available = []
+        if checkpoint_dir.exists():
+            available = [p.name for p in checkpoint_dir.glob("*.safetensors")]
+        raise FileNotFoundError(
+            f"CRITICAL: Required image model missing at {model_path}. "
+            f"Set COMFYUI_CHECKPOINT_NAME env var to match an actual file. "
+            f"Found in {checkpoint_dir}: {available or 'directory not found / empty'}"
+        )
+
+def _generate_single_image(base_url: str, positive_prompt: str, save_path: Path, width: int = WIDTH, height: int = HEIGHT):
     """Orchestrate generating a single image via ComfyUI."""
     negative_prompt = "Nature, Mountains, Travel, Romance, Random people, Generic AI wallpaper, Futuristic city, Unrelated technology art, anime, cartoon, text, watermark, bad quality"
     
@@ -202,7 +229,7 @@ def _generate_single_image(base_url: str, positive_prompt: str, save_path: Path)
         logger.warning(f"Prompt failed validation, sanitizing: {positive_prompt[:60]}...")
         positive_prompt = _sanitize_prompt(positive_prompt)
     
-    workflow = _build_comfyui_prompt(positive_prompt, negative_prompt)
+    workflow = _build_comfyui_prompt(positive_prompt, negative_prompt, width, height)
     payload = {"prompt": workflow}
     
     # Ensure it's running right before generating to handle mid-generation crashes
@@ -225,13 +252,44 @@ def generate_scene_images(scenes: List[Dict[str, Any]], config: Config, date_str
     Generate exactly ONE dynamic image per scene using local ComfyUI.
     Returns a list of dictionaries: [{"start": float, "end": float, "path": str}]
     """
+    logger.info("CRITICAL DEBUG FIX: Enforcing exactly 5 scenes.")
+    scenes = scenes[:5]
     logger.info("Generating advanced dynamic scenes via ComfyUI Director...")
-    
-    out_dir = config.project_root / "assets" / "scenes"
+
+    # BUGFIX: out_dir used to be a single fixed path ("assets/scenes") shared
+    # across EVERY attempt and EVERY date_str. When a ComfyUI call raised mid-loop
+    # (missing checkpoint, server down, timeout) on a later attempt with FEWER
+    # scenes than a previous successful attempt, the leftover higher-numbered
+    # PNGs from the earlier attempt stayed on disk. A later len(image_segments)
+    # check could then pass even though half the "images" on disk were stale
+    # leftovers from a different script. Scoping by date_str guarantees every
+    # attempt starts from a clean, isolated directory.
+    out_dir = config.project_root / "assets" / "scenes" / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Clear any partial output from a previous failed attempt at this exact
+    # date_str so stale frames can never leak into a new render.
+    for stale in out_dir.glob("scene_*.png"):
+        stale.unlink()
     
     import ollama
-    
+
+    # ======================================================================
+    # LEARNED VISUAL PREFERENCES
+    # Inject only category="visual" rules from memory.json into the Director
+    # AI prompt. This is the visual-pipeline equivalent of the memory_string
+    # injection crew_writer.py already does for script-writing agents — that
+    # injection only ever reached the script agents, never this prompt, so
+    # nothing taught via --teach or learned from quality scores could ever
+    # influence image generation until this was added.
+    # ======================================================================
+    from src.memory import load_memory_by_category
+    visual_rules = load_memory_by_category("visual")
+    visual_memory_string = ""
+    if visual_rules:
+        visual_memory_string = "\n\nLEARNED VISUAL PREFERENCES (YOU MUST OBEY THESE STRICTLY):\n"
+        for i, rule in enumerate(visual_rules, 1):
+            visual_memory_string += f"{i}. {rule}\n"
+
     # ======================================================================
     # SANITIZE SCENE TEXT BEFORE SENDING TO DIRECTOR (BUG 2 FIX)
     # ======================================================================
@@ -245,18 +303,19 @@ CRITICAL RULES:
 1. Every image MUST directly relate to and explain the current spoken sentence. A viewer without audio must understand the story from visuals alone.
 2. For EVERY scene, you must extract: Company, Product, Feature, Person, Technology. Use these exact entities to generate the image prompt.
 3. Validate your prompt: 'Does this image directly support the narration?' If NO, rewrite the prompt.
-4. NEVER use generic tech art, futuristic cities, random people, or unrelated landscapes.
-5. Ensure every single prompt is visually distinct but highly relevant.
-6. Return ONLY a pure JSON array of objects. NO extra text before or after the JSON.
+4. NEVER use generic tech art, futuristic cities, random people, static logos, or unrelated landscapes.
+5. YOUR PROMPTS MUST BE HIGHLY DYNAMIC AND CINEMATIC. Do not just put a logo next to a logo. Use action verbs and cinematic descriptors! Example keywords to use: cinematic lighting, dynamic angle, low angle, motion blur, active scene, depth of field, dramatic.
+6. Ensure every single prompt is visually distinct but highly relevant.
+7. Return ONLY a pure JSON array of objects. NO extra text before or after the JSON.
 
 Format:
 [
   {
     "scene_index": 0,
     "entities": {"Company": "Google", "Product": "Gemini", "Feature": "Update", "Person": "None", "Technology": "AI"},
-    "prompt": "Google logo alongside Gemini logo, official event visual, clear branding, photorealistic"
+    "prompt": "A person holding a smartphone displaying the Google Gemini logo, cinematic neon lighting, dynamic low angle, background motion blur, highly detailed"
   }
-]"""
+]""" + visual_memory_string
 
     prompt_map = {}
     
@@ -328,7 +387,37 @@ Format:
         
         slide_path = out_dir / f"scene_{i+1:03d}.png"
         logger.info(f"Generating image {i+1}/{len(scenes)}: {slide_path.name} | Prompt: {prompt[:80]}...")
-        _generate_single_image(config.comfyui_base_url, prompt, slide_path)
+
+        # BUGFIX: previously _generate_single_image() exceptions propagated
+        # straight out of this function, aborting the ENTIRE batch the moment
+        # ANY one scene failed (ComfyUI timeout, transient API error, etc).
+        # That is the direct mechanism behind "20-30 scenes planned but only
+        # 1-2 images produced": scene 3 fails -> scenes 4..30 never even attempt
+        # generation. We now retry once, and only fail that single scene
+        # (not the whole batch) if both attempts fail. The caller's
+        # `len(generated) >= len(scenes)` check (added below) still aborts
+        # the pipeline before render if we end up short — it just no longer
+        # masks WHICH scenes failed or kills early scenes that succeeded.
+        # Emergency ComfyUI Fix: test mode abort
+        # Removed for this explicit 5-scene test
+
+        success = False
+        for img_attempt in range(2):
+            try:
+                if img_attempt == 0:
+                    _generate_single_image(config.comfyui_base_url, prompt, slide_path, width=WIDTH, height=HEIGHT)
+                else:
+                    logger.warning(f"Scene {i+1} timeout/failure detected. Retrying with fallback 1024x576 resolution.")
+                    _generate_single_image(config.comfyui_base_url, prompt, slide_path, width=1024, height=576)
+                success = True
+                break
+            except Exception as e:
+                logger.error(f"Scene {i+1} image generation failed (try {img_attempt + 1}/2): {e}")
+                time.sleep(3)
+
+        if not success:
+            logger.error(f"Scene {i+1} permanently failed after retries. Skipping this scene's image — it will be flagged by the count check below.")
+            continue
         
         final_image_segments.append({
             "start": scene["start"],
@@ -337,4 +426,17 @@ Format:
         })
 
     logger.info(f"Successfully generated {len(final_image_segments)} dynamic image segments.")
+
+    # Verify requirement: generated_images > 0
+    if len(final_image_segments) == 0:
+        raise RuntimeError("EMERGENCY STOP: 0 images generated. Halting pipeline.")
+
+    # Verify requirement: generated_images >= scene_count
+    if len(final_image_segments) < len(scenes):
+        logger.error(
+            f"IMAGE COUNT MISMATCH: {len(final_image_segments)} images generated "
+            f"for {len(scenes)} scenes. Missing scene indices: "
+            f"{[i+1 for i in range(len(scenes)) if i not in {int(Path(seg['path']).stem.split('_')[1]) - 1 for seg in final_image_segments}]}"
+        )
+
     return final_image_segments

@@ -148,14 +148,13 @@ def generate_voice(script_text: str, config: Config, date_str: str) -> VoiceResu
     logger.info("VOICE GENERATOR — Starting Sarvam TTS for date '%s'", date_str)
     logger.info("=" * 60)
     
-    if audio_path.exists():
-        logger.info(f"Found cached audio for {date_str}, skipping TTS generation.")
-        return VoiceResult(
-            audio_path=str(audio_path),
-            subtitle_path=str(srt_path),
-            word_timestamps=[]
-        )
-        
+    # NOTE: Caching by date_str alone is unsafe — the self-improvement loop in
+    # main.py calls generate_voice() multiple times per date_str with DIFFERENT
+    # script_data (attempts 1/3/5 each regenerate the script). A stale cache
+    # here used to return word_timestamps=[], which let Whisper align the NEW
+    # script text against OLD leftover audio downstream. That mismatch is the
+    # root cause of "visuals don't match narration". Caching by date_str is
+    # disabled. If you want caching, key it off a hash of script_text instead.
     cleaned_script = _clean_text_for_tts(script_text)
     
     if not config.sarvam_api_key:

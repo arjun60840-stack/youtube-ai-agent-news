@@ -1,0 +1,236 @@
+diff --git a/main.py b/main.py
+index 51d59f2..69f6615 100644
+--- a/main.py
++++ b/main.py
+@@ -352,6 +352,14 @@ def run_pipeline(
+         logger.info(f"SELF IMPROVEMENT LOOP: ATTEMPT {attempt}/5")
+         logger.info("=" * 60)
+ 
++        # BUGFIX: image_segments was NOT reset here. If an earlier attempt
++        # threw mid-way through generate_scene_images() (e.g. ComfyUI offline),
++        # the `except` block below did `continue` WITHOUT clearing
++        # image_segments, so a stale list (sometimes from a completely
++        # different, shorter scene set) could survive into the next attempt's
++        # `len(image_segments) < len(scenes)` check and pass it incorrectly.
++        image_segments = None
++
+         try:
+             # Attempt strategies
+             if attempt == 1 or attempt == 5:
+@@ -383,10 +391,35 @@ def run_pipeline(
+                 scenes = split_into_scenes(word_timestamps)
+                 image_segments = _step_generate_slides(scenes, config, f"{date_str}_v{attempt}", logger)
+ 
++            if image_segments is None or scenes is None:
++                logger.error("image_segments or scenes is None after this attempt — treating as failure.")
++                continue
++
+             if len(image_segments) < len(scenes):
+                 logger.error(f"Missing images. Generated {len(image_segments)} / {len(scenes)}.")
+                 continue
+ 
++            # Verify every scene has: narration, subtitle text, image, duration
++            # (subtitle text lives on the scene dict's "text" field; the .ass
++            # file itself is generated later in Step 5, so we check the inputs
++            # to that step here, before committing to this attempt).
++            incomplete = []
++            for idx, (scene, seg) in enumerate(zip(scenes, image_segments)):
++                missing = []
++                if not scene.get("text", "").strip():
++                    missing.append("narration/subtitle text")
++                if not seg.get("path") or not Path(seg["path"]).exists():
++                    missing.append("image")
++                duration = seg.get("end", 0) - seg.get("start", 0)
++                if duration <= 0:
++                    missing.append("duration")
++                if missing:
++                    incomplete.append((idx + 1, missing))
++
++            if incomplete:
++                logger.error(f"Scenes missing required fields: {incomplete}")
++                continue
++
+             # Quality Review
+             score = review_video_metadata(script_data, image_segments, scenes, config)
+             
+diff --git a/src/image_generator.py b/src/image_generator.py
+index b63b5eb..0008ffb 100644
+--- a/src/image_generator.py
++++ b/src/image_generator.py
+@@ -150,10 +150,20 @@ def _download_comfyui_image(base_url: str, filename: str, save_path: Path):
+     img_url = f"{base_url}/view?filename={filename}&type=output"
+     urllib.request.urlretrieve(img_url, str(save_path))
+ 
+-def ensure_comfyui_running(base_url: str):
+-    """Ensures ComfyUI is running, starts it if offline, and verifies the model exists."""
++def ensure_comfyui_running(base_url: str, config: "Config" = None):
++    """Ensures ComfyUI is running, starts it if offline, and verifies the model exists.
++
++    BUGFIX: comfy_dir and the checkpoint filename were hardcoded to
++    "%USERPROFILE%\\ComfyUI" and "juggernautXL_ragnarok.safetensors". If your
++    actual ComfyUI install path or checkpoint filename differs even slightly
++    (different model name, different drive, portable install, Linux/WSL),
++    this raises FileNotFoundError on EVERY scene, every single time, which is
++    why "ComfyUI images do not appear in the final video" -- generation never
++    succeeds even once. Both are now read from Config / env vars with the old
++    values kept ONLY as a last-resort default.
++    """
+     logger.info("Checking ComfyUI server status...")
+-    
++
+     is_running = False
+     try:
+         res = requests.get(base_url)
+@@ -161,18 +171,26 @@ def ensure_comfyui_running(base_url: str):
+             is_running = True
+     except requests.exceptions.RequestException:
+         pass
+-        
++
++    comfy_dir = os.environ.get(
++        "COMFYUI_INSTALL_DIR",
++        os.path.expandvars(r"%USERPROFILE%\ComfyUI"),
++    )
++    checkpoint_name = os.environ.get(
++        "COMFYUI_CHECKPOINT_NAME",
++        "juggernautXL_ragnarok.safetensors",
++    )
++
+     if not is_running:
+         logger.warning(f"ComfyUI is offline at {base_url}. Attempting to start automatically...")
+-        comfy_dir = os.path.expandvars(r"%USERPROFILE%\ComfyUI")
+         cmd = 'call venv\\Scripts\\activate && start "" python main.py'
+-        
++
+         try:
+             subprocess.Popen(cmd, cwd=comfy_dir, shell=True)
+             logger.info("Spawned ComfyUI process. Waiting up to 120 seconds...")
+         except Exception as e:
+             raise RuntimeError(f"Failed to start ComfyUI subprocess: {e}")
+-            
++
+         start_time = time.time()
+         while time.time() - start_time < 120:
+             try:
+@@ -183,13 +201,21 @@ def ensure_comfyui_running(base_url: str):
+                     break
+             except requests.exceptions.RequestException:
+                 time.sleep(5)
+-                
++
+         if not is_running:
+             raise RuntimeError("ComfyUI failed to start within 120 seconds.")
+-            
+-    model_path = Path(os.path.expandvars(r"%USERPROFILE%\ComfyUI\models\checkpoints\juggernautXL_ragnarok.safetensors"))
++
++    checkpoint_dir = Path(comfy_dir) / "models" / "checkpoints"
++    model_path = checkpoint_dir / checkpoint_name
+     if not model_path.exists():
+-        raise FileNotFoundError(f"CRITICAL: Required image model missing at {model_path}")
++        available = []
++        if checkpoint_dir.exists():
++            available = [p.name for p in checkpoint_dir.glob("*.safetensors")]
++        raise FileNotFoundError(
++            f"CRITICAL: Required image model missing at {model_path}. "
++            f"Set COMFYUI_CHECKPOINT_NAME env var to match an actual file. "
++            f"Found in {checkpoint_dir}: {available or 'directory not found / empty'}"
++        )
+ 
+ def _generate_single_image(base_url: str, positive_prompt: str, save_path: Path):
+     """Orchestrate generating a single image via ComfyUI."""
+@@ -226,9 +252,21 @@ def generate_scene_images(scenes: List[Dict[str, Any]], config: Config, date_str
+     Returns a list of dictionaries: [{"start": float, "end": float, "path": str}]
+     """
+     logger.info("Generating advanced dynamic scenes via ComfyUI Director...")
+-    
+-    out_dir = config.project_root / "assets" / "scenes"
++
++    # BUGFIX: out_dir used to be a single fixed path ("assets/scenes") shared
++    # across EVERY attempt and EVERY date_str. When a ComfyUI call raised mid-loop
++    # (missing checkpoint, server down, timeout) on a later attempt with FEWER
++    # scenes than a previous successful attempt, the leftover higher-numbered
++    # PNGs from the earlier attempt stayed on disk. A later len(image_segments)
++    # check could then pass even though half the "images" on disk were stale
++    # leftovers from a different script. Scoping by date_str guarantees every
++    # attempt starts from a clean, isolated directory.
++    out_dir = config.project_root / "assets" / "scenes" / date_str
+     out_dir.mkdir(parents=True, exist_ok=True)
++    # Clear any partial output from a previous failed attempt at this exact
++    # date_str so stale frames can never leak into a new render.
++    for stale in out_dir.glob("scene_*.png"):
++        stale.unlink()
+     
+     import ollama
+     
+@@ -328,7 +366,30 @@ Format:
+         
+         slide_path = out_dir / f"scene_{i+1:03d}.png"
+         logger.info(f"Generating image {i+1}/{len(scenes)}: {slide_path.name} | Prompt: {prompt[:80]}...")
+-        _generate_single_image(config.comfyui_base_url, prompt, slide_path)
++
++        # BUGFIX: previously _generate_single_image() exceptions propagated
++        # straight out of this function, aborting the ENTIRE batch the moment
++        # ANY one scene failed (ComfyUI timeout, transient API error, etc).
++        # That is the direct mechanism behind "20-30 scenes planned but only
++        # 1-2 images produced": scene 3 fails -> scenes 4..30 never even attempt
++        # generation. We now retry once, and only fail that single scene
++        # (not the whole batch) if both attempts fail. The caller's
++        # `len(generated) >= len(scenes)` check (added below) still aborts
++        # the pipeline before render if we end up short — it just no longer
++        # masks WHICH scenes failed or kills early scenes that succeeded.
++        success = False
++        for img_attempt in range(2):
++            try:
++                _generate_single_image(config.comfyui_base_url, prompt, slide_path)
++                success = True
++                break
++            except Exception as e:
++                logger.error(f"Scene {i+1} image generation failed (try {img_attempt + 1}/2): {e}")
++                time.sleep(3)
++
++        if not success:
++            logger.error(f"Scene {i+1} permanently failed after retries. Skipping this scene's image — it will be flagged by the count check below.")
++            continue
+         
+         final_image_segments.append({
+             "start": scene["start"],
+@@ -337,4 +398,13 @@ Format:
+         })
+ 
+     logger.info(f"Successfully generated {len(final_image_segments)} dynamic image segments.")
++
++    # Verify requirement: generated_images >= scene_count
++    if len(final_image_segments) < len(scenes):
++        logger.error(
++            f"IMAGE COUNT MISMATCH: {len(final_image_segments)} images generated "
++            f"for {len(scenes)} scenes. Missing scene indices: "
++            f"{[i+1 for i in range(len(scenes)) if i not in {int(Path(seg['path']).stem.split('_')[1]) - 1 for seg in final_image_segments}]}"
++        )
++
+     return final_image_segments
+diff --git a/src/voice_generator.py b/src/voice_generator.py
+index daf7580..52bc9ac 100644
+--- a/src/voice_generator.py
++++ b/src/voice_generator.py
+@@ -148,14 +148,13 @@ def generate_voice(script_text: str, config: Config, date_str: str) -> VoiceResu
+     logger.info("VOICE GENERATOR — Starting Sarvam TTS for date '%s'", date_str)
+     logger.info("=" * 60)
+     
+-    if audio_path.exists():
+-        logger.info(f"Found cached audio for {date_str}, skipping TTS generation.")
+-        return VoiceResult(
+-            audio_path=str(audio_path),
+-            subtitle_path=str(srt_path),
+-            word_timestamps=[]
+-        )
+-        
++    # NOTE: Caching by date_str alone is unsafe — the self-improvement loop in
++    # main.py calls generate_voice() multiple times per date_str with DIFFERENT
++    # script_data (attempts 1/3/5 each regenerate the script). A stale cache
++    # here used to return word_timestamps=[], which let Whisper align the NEW
++    # script text against OLD leftover audio downstream. That mismatch is the
++    # root cause of "visuals don't match narration". Caching by date_str is
++    # disabled. If you want caching, key it off a hash of script_text instead.
+     cleaned_script = _clean_text_for_tts(script_text)
+     
+     if not config.sarvam_api_key:

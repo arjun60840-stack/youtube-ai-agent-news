@@ -51,6 +51,15 @@ DEFAULT_RSS_FEEDS: List[str] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# Allowed topics for Hindi Tech News
+# ---------------------------------------------------------------------------
+ALLOWED_TOPICS: List[str] = [
+    "AI", "OpenAI", "ChatGPT", "Google", "Gemini", "Microsoft",
+    "Apple", "Android", "iPhone", "NVIDIA", "Cybersecurity",
+    "Technology Launches", "Software Updates"
+]
+
 
 @dataclass
 class Config:
@@ -131,9 +140,10 @@ class Config:
     ffmpeg_path: str = "ffmpeg"
 
     # ------------------------------------------------------------------
-    # RSS feeds
+    # RSS feeds & Topics
     # ------------------------------------------------------------------
     rss_feeds: List[str] = field(default_factory=lambda: list(DEFAULT_RSS_FEEDS))
+    allowed_topics: List[str] = field(default_factory=lambda: list(ALLOWED_TOPICS))
 
     # ------------------------------------------------------------------
     # Derived directory paths (populated in __post_init__)
