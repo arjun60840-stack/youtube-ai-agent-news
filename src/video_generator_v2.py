@@ -11,18 +11,24 @@ from src.voice_generator_v2 import SceneAudioResult
 
 logger = logging.getLogger(__name__)
 
-def _generate_ass_subtitles(script_data: ScriptDataV2, audio_results: List[SceneAudioResult], save_path: Path):
+def _generate_ass_subtitles(script_data: ScriptDataV2, audio_results: List[SceneAudioResult], save_path: Path, config: Config):
     """Generate an ASS subtitle file from the V2 script scenes and precise audio durations."""
     
-    ass_header = """[Script Info]
+    is_portrait = getattr(config, "video_format", "landscape") == "portrait"
+    play_res_x = 720 if is_portrait else 1280
+    play_res_y = 1280 if is_portrait else 720
+    font_size = 42 if is_portrait else 54
+    margin_v = 150 if is_portrait else 50
+    
+    ass_header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1280
-PlayResY: 720
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
 WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,2,2,10,10,50,1
+Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,2,2,20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -73,7 +79,7 @@ def generate_video_v2(
     out_video = videos_dir / f"{date_str}_final_video.mp4"
     ass_path = videos_dir / f"{date_str}.ass"
     
-    _generate_ass_subtitles(script_data, audio_results, ass_path)
+    _generate_ass_subtitles(script_data, audio_results, ass_path, config)
     
     ffmpeg_cmd = [config.ffmpeg_path, "-y"]
     
@@ -105,7 +111,8 @@ def generate_video_v2(
         pan_y = random.choice(["y", "ih/2-(ih/zoom/2)", "(ih-ih/zoom)/2"])
         
         # Trim visual to exact audio duration + crossfade buffer (we won't crossfade for simplicity, just exact cut)
-        vf = f"[{i}:v]zoompan=z='{z_expr}':x='{pan_x}':y='{pan_y}':d=25*{duration}:s=1280x720,trim=duration={duration}[v{i}];"
+        scale_res = "720x1280" if getattr(config, "video_format", "landscape") == "portrait" else "1280x720"
+        vf = f"[{i}:v]zoompan=z='{z_expr}':x='{pan_x}':y='{pan_y}':d=25*{duration}:s={scale_res},trim=duration={duration}[v{i}];"
         filter_complex.append(vf)
         video_streams.append(f"[v{i}]")
         

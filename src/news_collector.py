@@ -101,12 +101,14 @@ def _get_past_titles(config: Config) -> List[str]:
     """Retrieve the titles of the last 30 generated scripts to prevent duplicates."""
     past_titles = []
     try:
-        script_files = sorted(config.scripts_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
+        script_files = sorted(config.scripts_dir.glob("*_raw.json"), key=lambda x: x.stat().st_mtime, reverse=True)
         for f in script_files[:30]:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-                if "title" in data:
-                    past_titles.append(data["title"])
+                if "stories_used" in data and len(data["stories_used"]) > 0:
+                    title = data["stories_used"][0].get("title")
+                    if title:
+                        past_titles.append(title)
             except Exception:
                 pass
     except Exception as e:

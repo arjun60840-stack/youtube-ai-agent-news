@@ -33,10 +33,16 @@ from dotenv import load_dotenv
 # Default RSS feed URLs — Google News technology & AI topic feeds
 # ---------------------------------------------------------------------------
 DEFAULT_RSS_FEEDS: List[str] = [
-    # Google News "Technology" topic feed (English, US)
+    # Google News "Technology" topic feed
     (
         "https://news.google.com/rss/topics/"
         "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB"
+        "?hl=en-US&gl=US&ceid=US:en"
+    ),
+    # Google News "World News" topic feed
+    (
+        "https://news.google.com/rss/topics/"
+        "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB"
         "?hl=en-US&gl=US&ceid=US:en"
     ),
     # Google News search: "artificial intelligence"
@@ -44,20 +50,21 @@ DEFAULT_RSS_FEEDS: List[str] = [
         "https://news.google.com/rss/search"
         "?q=artificial+intelligence&hl=en-US&gl=US&ceid=US:en"
     ),
-    # Google News search: "technology news"
+    # Google News search: "world news"
     (
         "https://news.google.com/rss/search"
-        "?q=technology+news&hl=en-US&gl=US&ceid=US:en"
+        "?q=world+news&hl=en-US&gl=US&ceid=US:en"
     ),
 ]
 
 # ---------------------------------------------------------------------------
-# Allowed topics for Hindi Tech News
+# Allowed topics for Hindi Tech & World News
 # ---------------------------------------------------------------------------
 ALLOWED_TOPICS: List[str] = [
     "AI", "OpenAI", "ChatGPT", "Google", "Gemini", "Microsoft",
     "Apple", "Android", "iPhone", "NVIDIA", "Cybersecurity",
-    "Technology Launches", "Software Updates"
+    "Technology Launches", "Software Updates", "World News",
+    "Global Events", "International Relations", "Science & Space"
 ]
 
 
@@ -99,8 +106,28 @@ class Config:
     project_root: Path = field(
         default_factory=lambda: Path(__file__).resolve().parent.parent
     )
-    ollama_model: str = "qwen2.5"
+    gemini_api_keys: List[str] = field(default_factory=list)
+    active_gemini_key_index: int = 0
+    gemini_model: str = "gemini-2.5-flash"
+    
+    ollama_model: str = "llama3:8b"
     ollama_base_url: str = "http://localhost:11434"
+    
+    def get_current_gemini_key(self) -> str:
+        if not self.gemini_api_keys:
+            return ""
+        return self.gemini_api_keys[self.active_gemini_key_index]
+        
+    def rotate_gemini_key(self) -> bool:
+        """Rotates to the next Gemini API key if available. Returns True if successfully rotated."""
+        if not self.gemini_api_keys or len(self.gemini_api_keys) <= 1:
+            return False
+        
+        old_key = self.get_current_gemini_key()
+        self.active_gemini_key_index = (self.active_gemini_key_index + 1) % len(self.gemini_api_keys)
+        new_key = self.get_current_gemini_key()
+        return old_key != new_key
+    
     
     # ------------------------------------------------------------------
     # Sarvam AI TTS
@@ -119,6 +146,11 @@ class Config:
     tts_rate: str = "+0%"
     tts_pitch: str = "+0Hz"
     elevenlabs_api_key: str = ""
+    
+    # ------------------------------------------------------------------
+    # Channel Context
+    # ------------------------------------------------------------------
+    channel_id: str = "default"
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM" # Rachel default
 
     # ------------------------------------------------------------------
@@ -140,10 +172,13 @@ class Config:
     ffmpeg_path: str = "ffmpeg"
 
     # ------------------------------------------------------------------
-    # RSS feeds & Topics
+    # RSS feeds, Topics & Video Settings
     # ------------------------------------------------------------------
     rss_feeds: List[str] = field(default_factory=lambda: list(DEFAULT_RSS_FEEDS))
     allowed_topics: List[str] = field(default_factory=lambda: list(ALLOWED_TOPICS))
+    video_format: str = "landscape"  # "landscape" or "portrait"
+    use_real_images: bool = False  # Fetch real images from web instead of AI generation
+
 
     # ------------------------------------------------------------------
     # Derived directory paths (populated in __post_init__)
@@ -174,13 +209,19 @@ class Config:
             config/          ← OAuth secrets & tokens
         """
         # Build paths --------------------------------------------------
-        self.news_dir = self.project_root / "news"
-        self.scripts_dir = self.project_root / "scripts"
-        self.audio_dir = self.project_root / "audio"
-        self.images_dir = self.project_root / "images"
-        self.videos_dir = self.project_root / "videos"
-        self.logs_dir = self.project_root / "logs"
-        self.config_dir = self.project_root / "config"
+        # Isolate outputs by channel_id
+        channel_base = self.project_root / self.channel_id
+        
+        self.news_dir = channel_base / "news"
+        self.scripts_dir = channel_base / "scripts"
+        self.audio_dir = channel_base / "audio"
+        self.images_dir = channel_base / "images"
+        self.videos_dir = channel_base / "videos"
+        self.logs_dir = channel_base / "logs"
+        
+        # We can leave config_dir pointing to the global config folder if we want,
+        # but youtube secrets are isolated by channel directory anyway
+        self.config_dir = self.project_root / "channels" / self.channel_id
 
         # Create every directory (idempotent) --------------------------
         for directory in (
@@ -199,73 +240,90 @@ class Config:
 # Factory function
 # ======================================================================
 
-def load_config() -> Config:
+def load_config(channel_name: str = "tech_news") -> Config:
     """
-    Build a ``Config`` instance from environment variables.
+    Build a ``Config`` instance from environment variables and channel-specific JSON.
 
-    Reads a ``.env`` file located at the project root (if present) and
-    then overrides dataclass defaults with any matching env vars.
+    Reads a ``.env`` file located at the project root for global keys,
+    then reads ``channels/{channel_name}/config.json`` for channel overrides.
 
-    Environment variable mapping (all optional):
-        OLLAMA_MODEL, OLLAMA_BASE_URL,
-        TTS_VOICE, TTS_RATE, TTS_PITCH,
-        YOUTUBE_CLIENT_SECRETS, YOUTUBE_TOKEN_PATH,
-        YOUTUBE_PRIVACY, YOUTUBE_CATEGORY,
-        CHANNEL_NAME, FFMPEG_PATH,
-        RSS_FEEDS  (comma-separated list of URLs)
+    Args:
+        channel_name: Name of the channel directory in `channels/`
 
     Returns:
-        Config: Fully initialised configuration object with all
-                directories created on disk.
+        Config: Fully initialised configuration object.
     """
-    # Determine project root first so we can find .env
+    import json
     project_root: Path = Path(__file__).resolve().parent.parent
-
-    # Load .env from the project root (silently skip if missing)
     dotenv_path: Path = project_root / ".env"
     load_dotenv(dotenv_path=dotenv_path)
 
-    # ------------------------------------------------------------------
-    # Helper: read an env var, returning *default* when unset / empty
-    # ------------------------------------------------------------------
     def _env(var: str, default: str) -> str:
-        value: str | None = os.getenv(var)
+        value = os.getenv(var)
         return value if value else default
 
-    # ------------------------------------------------------------------
-    # Parse RSS_FEEDS: expect a comma-separated string in the env var
-    # ------------------------------------------------------------------
-    raw_feeds: str | None = os.getenv("RSS_FEEDS")
-    if raw_feeds:
-        rss_feeds: List[str] = [
-            url.strip() for url in raw_feeds.split(",") if url.strip()
-        ]
-    else:
-        rss_feeds = list(DEFAULT_RSS_FEEDS)
+    raw_gemini_keys: str | None = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY")
+    gemini_api_keys: List[str] = []
+    if raw_gemini_keys:
+        gemini_api_keys = [k.strip() for k in raw_gemini_keys.split(",") if k.strip()]
 
-    # ------------------------------------------------------------------
-    # Construct and return the Config dataclass
-    # ------------------------------------------------------------------
+    # Setup channel paths
+    channel_dir = project_root / "channels" / channel_name
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load channel config overrides
+    channel_config_path = channel_dir / "config.json"
+    channel_data = {}
+    if channel_config_path.exists():
+        try:
+            with open(channel_config_path, "r", encoding="utf-8") as f:
+                channel_data = json.load(f)
+        except Exception as e:
+            print(f"Failed to load channel config {channel_config_path}: {e}")
+
+    # Fallback to env or defaults if not in channel_data
+    rss_feeds = channel_data.get("rss_feeds")
+    if not rss_feeds:
+        raw_feeds = os.getenv("RSS_FEEDS")
+        if raw_feeds:
+            rss_feeds = [url.strip() for url in raw_feeds.split(",") if url.strip()]
+        else:
+            rss_feeds = list(DEFAULT_RSS_FEEDS)
+            
+    allowed_topics = channel_data.get("allowed_topics", list(ALLOWED_TOPICS))
+    
+    # Check for channel-specific client secrets
+    client_secrets = channel_dir / "client_secrets.json"
+    if not client_secrets.exists():
+        # Fallback to old global location
+        client_secrets = project_root / "config" / "client_secrets.json"
+        
+    token_path = channel_dir / "youtube_token.json"
+    if not token_path.exists():
+        # Fallback to old global location
+        token_path = project_root / "config" / "youtube_token.json"
     return Config(
         project_root=project_root,
-        ollama_model=_env("OLLAMA_MODEL", "qwen2.5"),
-        ollama_base_url=_env("OLLAMA_BASE_URL", "http://localhost:11434"),
+        gemini_api_keys=gemini_api_keys,
+        gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash"),
+        ollama_model=channel_data.get("ollama_model", _env("OLLAMA_MODEL", "llama3:8b")),
+        ollama_base_url=channel_data.get("ollama_base_url", _env("OLLAMA_BASE_URL", "http://localhost:11434")),
         sarvam_api_key=_env("SARVAM_API_KEY", ""),
         comfyui_base_url=_env("COMFYUI_BASE_URL", "http://127.0.0.1:8188"),
-        tts_voice=_env("TTS_VOICE", "en-IN-PrabhatNeural"),
-        tts_rate=_env("TTS_RATE", "+10%"),
-        tts_pitch=_env("TTS_PITCH", "+0Hz"),
+        tts_voice=channel_data.get("tts_voice", _env("TTS_VOICE", "en-IN-PrabhatNeural")),
+        tts_rate=channel_data.get("tts_rate", _env("TTS_RATE", "+10%")),
+        tts_pitch=channel_data.get("tts_pitch", _env("TTS_PITCH", "+0Hz")),
         elevenlabs_api_key=_env("ELEVENLABS_API_KEY", ""),
-        elevenlabs_voice_id=_env("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
-        youtube_client_secrets=_env(
-            "YOUTUBE_CLIENT_SECRETS", "config/client_secrets.json"
-        ),
-        youtube_token_path=_env(
-            "YOUTUBE_TOKEN_PATH", "config/youtube_token.json"
-        ),
-        youtube_privacy=_env("YOUTUBE_PRIVACY", "private"),
-        youtube_category=_env("YOUTUBE_CATEGORY", "28"),
-        channel_name=_env("CHANNEL_NAME", "AI Daily News"),
+        elevenlabs_voice_id=channel_data.get("elevenlabs_voice_id", _env("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")),
+        youtube_client_secrets=str(client_secrets),
+        youtube_token_path=str(token_path),
+        youtube_privacy=channel_data.get("youtube_privacy", _env("YOUTUBE_PRIVACY", "private")),
+        youtube_category=channel_data.get("youtube_category", _env("YOUTUBE_CATEGORY", "28")),
+        channel_name=channel_data.get("channel_name", channel_name.replace("_", " ").title()),
+        channel_id=channel_name,
         ffmpeg_path=_env("FFMPEG_PATH", "ffmpeg"),
         rss_feeds=rss_feeds,
+        allowed_topics=allowed_topics,
+        video_format=channel_data.get("video_format", _env("VIDEO_FORMAT", "landscape")),
+        use_real_images=channel_data.get("use_real_images", False),
     )

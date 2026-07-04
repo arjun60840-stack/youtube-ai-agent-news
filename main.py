@@ -26,9 +26,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 from src.config import Config, load_config
 from src.logger import get_logger, setup_logging
 from src.news_collector import collect_news, NewsStory
-from src.script_writer_v2 import generate_script_v2, ScriptDataV2
+from src.script_writer_v2 import generate_script_v2, pick_best_story, ScriptDataV2
 from src.voice_generator_v2 import generate_voice_v2, SceneAudioResult
-from src.image_generator_v2 import generate_scene_images_v2
+from src.image_generator_v2 import generate_scene_images_v2, generate_thumbnail_v2
 from src.video_generator_v2 import generate_video_v2
 from src.quality_reviewer_v2 import review_video_v2
 from src.youtube_uploader import upload_video
@@ -40,6 +40,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--skip-upload", action="store_true", default=False)
     parser.add_argument("--date", type=str, default=None)
+    parser.add_argument("--portrait", action="store_true", help="Generate a vertical YouTube Short (9:16)")
+    parser.add_argument("--channel", type=str, default="tech_news", help="Which channel configuration to run")
     parser.add_argument("--schedule", action="store_true", help="Setup daily scheduled tasks")
     parser.add_argument("--unschedule", action="store_true", help="Remove scheduled tasks")
     parser.add_argument("--check-schedule", action="store_true", help="Check if scheduled tasks exist")
@@ -48,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def run_pipeline(config: Config, date_str: str, skip_upload: bool = False) -> None:
     logger = get_logger("pipeline")
     logger.info("=" * 60)
-    logger.info("  AI DAILY NEWS YOUTUBE AGENT V2")
+    logger.info(f"  AI DAILY NEWS YOUTUBE AGENT V2 - {config.channel_name}")
     logger.info("  Date: %s", date_str)
     logger.info("=" * 60)
 
@@ -58,14 +60,13 @@ def run_pipeline(config: Config, date_str: str, skip_upload: bool = False) -> No
     if not stories:
         logger.critical("No news found. Aborting.")
         return
-    story = stories[0]
+    story = pick_best_story(stories, config)
     logger.info(f"Selected Story: {story.title}")
 
     # 2. Script Generation
     logger.info("STEP 2/6 — Generating Script V2")
     script_data = generate_script_v2(story, config, date_str)
-    logger.info(f"Generated {len(script_data.scenes)} scenes.")
-
+    
     # 3. Voice Generation
     logger.info("STEP 3/6 — Generating Voice (Sarvam AI)")
     audio_results = generate_voice_v2(script_data, config, date_str)
@@ -73,6 +74,7 @@ def run_pipeline(config: Config, date_str: str, skip_upload: bool = False) -> No
     # 4. Image Generation
     logger.info("STEP 4/6 — Generating Images (ComfyUI)")
     image_paths = generate_scene_images_v2(script_data, config, date_str)
+    thumbnail_path = generate_thumbnail_v2(script_data, config, date_str)
 
     # 5. Quality Review
     logger.info("STEP 5/6 — Quality Review")
@@ -90,17 +92,26 @@ def run_pipeline(config: Config, date_str: str, skip_upload: bool = False) -> No
         logger.info("Upload skipped via --skip-upload.")
     else:
         logger.info("STEP 7/7 — Uploading to YouTube")
-        full_description = f"Tech News Today! 🇮🇳\n\n{script_data.description}"
+        full_description = f"{config.channel_name} Today! 🇮🇳\n\n{script_data.description}"
         if script_data.hashtags:
             full_description += "\n\n" + " ".join(script_data.hashtags)
             
+        # Add hashtags to title (YouTube limit is 100 characters)
+        title_with_tags = script_data.title
+        if script_data.hashtags:
+            for tag in script_data.hashtags[:3]:
+                # Add tag if it fits within the 100 character limit
+                if len(title_with_tags) + len(tag) + 1 <= 95: 
+                    title_with_tags += f" {tag}"
+                    
         result = upload_video(
             video_path=video_path,
-            title=script_data.title,
+            title=title_with_tags,
             description=full_description,
             tags=script_data.tags,
             config=config,
             date_str=date_str,
+            thumbnail_path=thumbnail_path,
         )
         if result:
             logger.info(f"Upload successful: {result.get('url')}")
@@ -112,7 +123,10 @@ def main():
     args = parser.parse_args()
 
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
-    config = load_config()
+    config = load_config(args.channel)
+    if args.portrait:
+        config.video_format = "portrait"
+        
     setup_logging(config.logs_dir, date_str)
     
     logger = get_logger("main")

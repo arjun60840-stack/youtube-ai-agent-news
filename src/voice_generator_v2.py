@@ -137,17 +137,36 @@ def generate_voice_v2(script_data: ScriptDataV2, config: Config, date_str: str) 
             audio_bytes = _call_sarvam_api(cleaned_text, config.sarvam_api_key)
             with open(audio_path, "wb") as f:
                 f.write(audio_bytes)
-                
-            duration = _get_wav_duration(str(audio_path))
-            results.append(SceneAudioResult(
-                scene_number=scene.scene_number,
-                audio_path=str(audio_path),
-                duration=duration
-            ))
-            logger.info(f"Saved audio for scene {scene.scene_number} ({duration:.2f}s)")
-            
         except Exception as e:
             logger.error(f"Sarvam TTS Error on scene {scene.scene_number}: {e}")
-            raise e
+            logger.info("Falling back to edge-tts...")
+            import subprocess
+            tmp_mp3 = str(audio_path).replace(".wav", ".mp3")
+            cmd = [
+                "python", "-m", "edge_tts",
+                f"--voice={config.tts_voice}",
+                f"--rate={config.tts_rate}",
+                f"--pitch={config.tts_pitch}",
+                f"--text={cleaned_text}",
+                f"--write-media={tmp_mp3}"
+            ]
+            subprocess.run(cmd, check=True)
+            ffmpeg_cmd = [
+                config.ffmpeg_path,
+                "-y", "-i", tmp_mp3,
+                "-acodec", "pcm_s16le",
+                "-ar", "22050",
+                str(audio_path)
+            ]
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.remove(tmp_mp3)
+                
+        duration = _get_wav_duration(str(audio_path))
+        results.append(SceneAudioResult(
+            scene_number=scene.scene_number,
+            audio_path=str(audio_path),
+            duration=duration
+        ))
+        logger.info(f"Saved audio for scene {scene.scene_number} ({duration:.2f}s)")
             
     return results

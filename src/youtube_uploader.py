@@ -197,14 +197,22 @@ def _execute_resumable_upload(
                     video_path,
                 )
 
-        except HttpError as http_err:
-            # Retry on transient server errors (5xx)
-            if http_err.resp.status in (500, 502, 503, 504) and retries_used < _MAX_RETRIES:
+        except (HttpError, OSError) as err:
+            # Determine if it's retryable
+            is_retryable = False
+            if isinstance(err, HttpError):
+                if err.resp.status in (500, 502, 503, 504):
+                    is_retryable = True
+            elif isinstance(err, OSError):
+                # Network errors like ConnectionResetError or Timeout
+                is_retryable = True
+
+            if is_retryable and retries_used < _MAX_RETRIES:
                 delay = _RETRY_DELAYS[retries_used]
                 retries_used += 1
                 logger.warning(
-                    "Transient HTTP %d error during upload — retry %d/%d in %d s.",
-                    http_err.resp.status,
+                    "Transient error during upload (%s) — retry %d/%d in %d s.",
+                    type(err).__name__,
                     retries_used,
                     _MAX_RETRIES,
                     delay,
@@ -229,6 +237,7 @@ def upload_video(
     tags: List[str],
     config: Config,
     date_str: str,
+    thumbnail_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Upload a video to YouTube with the given metadata.
 
@@ -294,12 +303,14 @@ def upload_video(
     youtube: Resource = _build_youtube_service(creds)
 
     # Automatically append Shorts hashtags to ensure it gets routed to the Shorts feed
-    if "#shorts" not in description.lower():
-        description += "\n\n#shorts #youtubeshorts"
-    
-    lower_tags = [t.lower() for t in tags]
-    if "shorts" not in lower_tags:
-        tags.extend(["shorts", "youtubeshorts", "techshorts"])
+    # if it is a portrait video
+    if getattr(config, "video_format", "landscape") == "portrait":
+        if "#shorts" not in description.lower():
+            description += "\n\n#shorts #youtubeshorts"
+        
+        lower_tags = [t.lower() for t in tags]
+        if "shorts" not in lower_tags:
+            tags.extend(["shorts", "youtubeshorts", "techshorts"])
 
     # ------------------------------------------------------------------
     # 3. Prepare request body & media
@@ -372,5 +383,19 @@ def upload_video(
         video_url,
         privacy,
     )
+
+    # ------------------------------------------------------------------
+    # 7. Upload Custom Thumbnail (Optional)
+    # ------------------------------------------------------------------
+    if thumbnail_path and os.path.isfile(thumbnail_path):
+        logger.info("Setting custom thumbnail from: %s", thumbnail_path)
+        try:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(thumbnail_path)
+            ).execute()
+            logger.info("Custom thumbnail uploaded successfully!")
+        except Exception as exc:
+            logger.warning("Failed to upload custom thumbnail: %s", exc)
 
     return result
