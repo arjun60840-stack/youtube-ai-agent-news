@@ -53,14 +53,20 @@ def _call_sarvam_api(text: str, api_key: str) -> bytes:
     """Call Sarvam TTS API and return raw wav bytes."""
     url = "https://api.sarvam.ai/text-to-speech"
     
+    # Voice Profile: Professional Indian tech news presenter
+    # - Rahul: Energetic, confident male voice
+    # - Pace 1.25: Slightly faster (~170-180 wpm) but clear delivery
+    # - Temperature 0.7: Natural expressiveness, avoids monotone
+    # - 48kHz: Studio-quality audio output
     payload = {
         "inputs": [text],
         "target_language_code": "hi-IN",
-        "speaker": "amit",
-        "pace": 1.1,
-        "speech_sample_rate": 22050,
+        "speaker": "rahul",
+        "pace": 1.25,
+        "speech_sample_rate": 48000,
         "enable_preprocessing": True,
-        "model": "bulbul:v3"
+        "model": "bulbul:v3",
+        "temperature": 0.7
     }
     
     headers = {
@@ -155,7 +161,7 @@ def generate_voice_v2(script_data: ScriptDataV2, config: Config, date_str: str) 
                 config.ffmpeg_path,
                 "-y", "-i", tmp_mp3,
                 "-acodec", "pcm_s16le",
-                "-ar", "22050",
+                "-ar", "48000",
                 str(audio_path)
             ]
             subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
